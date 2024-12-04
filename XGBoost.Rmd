@@ -1,0 +1,402 @@
+---
+title: "Programming_Used Car"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-12-02"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+```{r}
+# Install for XGBoost
+install.packages("xgboost")        
+install.packages("caret")          
+install.packages("dplyr")          
+install.packages("lubridate")      
+install.packages("ggplot2")        
+install.packages("zoo")            
+
+# Install ARIMA 
+install.packages("forecast")       
+install.packages("tseries")        
+install.packages("seastests")      
+```
+```{r}
+library(readr)
+library(ggplot2)
+library(xgboost)
+library(caret)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(forecast)
+library(tseries)
+library(seastests)
+library(tidyr)
+library(ggplot2)
+library(scales)
+```
+
+```{r cars}
+# Download the dataset from GitHub
+url <- "https://raw.githubusercontent.com/fongbubble/UoB_MGRCM0034_Car_Sales/main/car_sales.csv"
+csv_file_path <- tempfile(fileext = ".csv")
+download.file(url, destfile = csv_file_path)
+print(paste("CSV File Path:", csv_file_path))
+
+# Read the CSV file
+df <- read_csv(csv_file_path)
+head(df, 5)
+```
+```{r}
+# Data Pre-Processing
+# Missing Values (Na) 
+missing_values <- colSums(is.na(df))
+missing_values
+```
+```{r}
+# Check for the number of duplicated rows
+num_duplicated_rows <- sum(duplicated(df))
+num_duplicated_rows
+```
+```{r}
+# Replace '5-Sep' with '9-5' and '3-Sep' with '9-3' in the 'Model' column
+df$Model <- sapply(df$Model, function(value) {
+  value <- gsub('5-Sep', '9-5', value)
+  value <- gsub('3-Sep', '9-3', value)
+  return(value)
+})
+```
+
+```{r}
+# Display the data
+print(df)
+```
+
+#XGBoost
+```{r}
+# Create sales quantity column
+df$quantity <- 1
+
+# Convert Date column to Date type
+df$date <- as.Date(df$Date, format = "%m/%d/%Y")
+
+
+# Aggregate data to daily totals
+daily_data <- df %>% 
+  group_by(date) %>% 
+  summarise(quantity = sum(quantity, na.rm = TRUE)) %>% 
+  ungroup()
+
+
+# Create time-series features
+daily_data <- daily_data %>% 
+  mutate(
+    day = day(date),
+    month = month(date),
+    year = year(date),
+    day_of_week = wday(date) - 1,  
+    week_of_year = isoweek(date),
+    lag_1 = lag(quantity, 1),
+    lag_2 = lag(quantity, 2),
+    lag_3 = lag(quantity, 3),
+    lag_4 = lag(quantity, 4),
+    lag_5 = lag(quantity, 5),
+    lag_6 = lag(quantity, 6),
+    lag_7 = lag(quantity, 7),
+    mav_7 = rollmean(quantity, 7, fill = NA, align = 'right'),
+    mstd_7 = rollapply(quantity, 7, sd, fill = NA, align = 'right')
+  )
+
+# Drop rows with Na values from the lagged features
+daily_data <- daily_data %>% filter(!is.na(lag_7))
+
+# Define features and target variable
+X <- daily_data %>% select(day, month, year, day_of_week, week_of_year, lag_1, lag_2, lag_3, lag_4, lag_5, lag_6, lag_7, mav_7, mstd_7)
+y <- daily_data$quantity
+
+# Split 80-20 test and train
+cutoff_index <- as.integer(nrow(X) * 0.8)
+X_train <- X[1:cutoff_index, ]
+X_test <- X[(cutoff_index + 1):nrow(X), ]
+y_train <- y[1:cutoff_index]
+y_test <- y[(cutoff_index + 1):length(y)]
+
+# Print
+cat('X train dimensions:', nrow(X_train), 'rows and', ncol(X_train), 'columns
+')
+cat('X test dimensions:', nrow(X_test), 'rows and', ncol(X_test), 'columns
+')
+
+```
+
+# Final Model Training and Evaluation
+```{r}
+# Define parameter for hyperparameter tuning
+param_grid <- expand.grid(
+  nrounds = c(100, 150),
+  max_depth = c(5, 7),
+  eta = c(0.01, 0.1),
+  subsample = c(0.8),
+  colsample_bytree = c(0.7, 1),
+  gamma = c(0),
+  min_child_weight = c(1, 3)
+)
+
+# Backward Elimination Process
+features <- colnames(X_train)
+best_score <- Inf
+best_features <- features
+
+cat("Starting Backward Elimination with Hyperparameter Tuning...\n\n")
+
+max_iterations <- min(length(features), 5)
+for (iteration in 1:max_iterations) {
+  cat("Iteration", iteration, ": Current Features ->", paste(features, collapse = ", "), "\n")
+  scores <- c()
+
+  # Test removing each feature
+  for (feature in features) {
+    features_subset <- setdiff(features, feature)
+    dtrain <- xgb.DMatrix(data = as.matrix(X_train[, features_subset]), label = y_train)
+    dtest <- xgb.DMatrix(data = as.matrix(X_test[, features_subset]), label = y_test)
+
+    # Hyperparameter tuning
+    xgb_trcontrol <- trainControl(method = "cv", number = 3)
+    xgb_train <- train(
+      x = as.matrix(X_train[, features_subset]),
+      y = y_train,
+      trControl = xgb_trcontrol,
+      tuneGrid = param_grid,
+      method = "xgbTree",
+      metric = "RMSE"
+    )
+
+    # Evaluate on test set
+    best_model <- xgb_train$finalModel
+    best_iteration <- xgb_train$bestTune$nrounds
+y_pred <- predict(best_model, newdata = as.matrix(X_test[, features_subset]))
+    score <- mean((y_test - y_pred)^2)
+    scores <- rbind(scores, data.frame(score = score, feature = feature))
+
+    cat("  Tested removing feature '", feature, "', MSE Score: ", round(score, 4), "\n")
+  }
+
+  # Find worst performing feature to remove
+  worst_feature <- scores$feature[which.max(scores$score)]
+  worst_score <- max(scores$score)
+  cat("  -> Worst performing feature to remove:", worst_feature, "with score", round(worst_score, 4), "\n\n")
+
+  # Check if removing the worst feature improved the best score
+  if (worst_score < best_score) {
+    best_score <- worst_score
+    features <- setdiff(features, worst_feature)
+    best_features <- features
+    cat("  Updated Best Score:", round(best_score, 4), "\n")
+    cat("  Updated Feature Set:", paste(best_features, collapse = ", "), "\n\n")
+  } else {
+    cat("  No improvement by removing any more features. Stopping elimination.\n\n")
+    break
+  }
+}
+
+# Final model training with the selected features
+cat("Training final model with best features and parameters...\n")
+final_model <- xgboost(
+  data = xgb.DMatrix(data = as.matrix(X_train[, best_features]), label = y_train),
+  nrounds = xgb_train$bestTune$nrounds,
+  max_depth = xgb_train$bestTune$max_depth,
+  eta = xgb_train$bestTune$eta,
+  subsample = xgb_train$bestTune$subsample,
+  colsample_bytree = xgb_train$bestTune$colsample_bytree,
+  gamma = xgb_train$bestTune$gamma,
+  objective = "reg:squarederror"
+)
+
+# Evaluate final model
+y_pred <- predict(final_model, newdata = as.matrix(X_test[, best_features]))
+final_mse <- mean((y_test - y_pred)^2)
+final_rmse <- sqrt(final_mse)  # RMSE
+final_mae <- mean(abs(y_test - y_pred))  # MAE
+final_r2 <- 1 - (sum((y_test - y_pred)^2) / sum((y_test - mean(y_test))^2))  # R^2
+
+# Print the results
+cat("\nBackward Elimination and Hyperparameter Tuning Completed.\n")
+cat("Selected Features:", paste(best_features, collapse = ", "), "\n")
+cat("Final Model Metrics:\n")
+cat("  Mean Squared Error (MSE):", round(final_mse, 4), "\n")
+cat("  Root Mean Squared Error (RMSE):", round(final_rmse, 4), "\n")
+cat("  Mean Absolute Error (MAE):", round(final_mae, 4), "\n")
+cat("  R-squared (R^2):", round(final_r2, 4), "\n")
+```
+# Visualize the results
+```{r}
+date_seq <- daily_data$date[(cutoff_index + 1):nrow(daily_data)]
+visualization_df <- data.frame(
+  Date = date_seq,
+  Historical = y_test,
+  Forecasted = y_pred
+)
+
+p <- ggplot(visualization_df, aes(x = Date)) +
+  geom_line(aes(y = Historical, color = "Historical Sales Quantity"), linewidth = 1.0) + 
+  geom_line(aes(y = Forecasted, color = "Forecasted Sales Quantity"), linetype = "solid", linewidth = 1.0) + 
+  labs(
+    x = "Month",
+    y = "Total Sales Quantity",
+    title = "Daily Car Sales Quantity Prediction"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 0, hjust = 1),
+    legend.position = "bottom",            
+    legend.box = "horizontal",             
+    legend.title = element_blank(),        
+    legend.text = element_text(size = 10), 
+    plot.title = element_text(size = 14, hjust = 0.5, margin = margin(t = 10, b = 10)) 
+  ) +
+  scale_color_manual(
+    values = c("Historical Sales Quantity" = "#5390d9", "Forecasted Sales Quantity" = "#cc0000")
+  )
+
+print(p)
+```
+# Forecasting the Next 3 Months
+```{r}
+# Use all data to train the model
+best_features <- c('day', 'month', 'year', 'day_of_week', 'week_of_year', 'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_5', 'lag_6', 'lag_7', 'mstd_7')
+final_model <- xgboost(data = as.matrix(X[best_features]), label = y, nrounds = 100)
+
+# Create a new data with features for the next 3 months
+next_three_months_data <- tail(daily_data, 7) %>% as.data.frame()  
+rolling_sales_list <- tail(daily_data$quantity, 7)
+
+# Set the date to next day and then loop to create the next 3 months
+for (i in 1:90) {  
+  next_date <- max(next_three_months_data$date) + days(1)
+  new_row <- data.frame(date = next_date)
+  new_row$day <- day(new_row$date)
+  new_row$month <- month(new_row$date)
+  new_row$year <- year(new_row$date)
+  new_row$day_of_week <- wday(new_row$date) - 1
+  new_row$week_of_year <- isoweek(new_row$date)
+
+  # Update lagged features based on previous predictions
+  for (lag in 1:7) {
+    new_row[[paste0('lag_', lag)]] <- rolling_sales_list[length(rolling_sales_list) - lag + 1]
+  }
+
+  # Calculate moving standard deviation
+  new_row$mstd_7 <- sd(tail(rolling_sales_list, 7))
+
+  # Predict the quantity using the final model
+  new_quantity <- predict(final_model, as.matrix(new_row[best_features]))
+
+  # Add the predicted quantity to the next 3 months
+  new_row$quantity <- new_quantity
+  next_three_months_data <- bind_rows(next_three_months_data, new_row)
+  rolling_sales_list <- c(rolling_sales_list, new_quantity)
+}
+
+# Visualize the next 3 months predictions
+ggplot() +
+  geom_line(data = daily_data, aes(x = date, y = quantity), color = '#5b8e7d', size = 1, linetype = "solid", label = "Historical Sales Quantity") +
+  geom_line(data = next_three_months_data, aes(x = date, y = quantity), color = '#bc4b51', size = 1, linetype = "dashed", label = "Next 3 Months Forecasted Sales Quantity") +
+  labs(x = 'Date', y = 'Total Sales Quantity',
+       title = 'XGBoost Model - Daily Car Sales Quantity Prediction for Next 3 Months') +
+  scale_x_date(limits = c(as.Date("2022-01-01"), as.Date("2024-04-01")), 
+               date_labels = "%Y-%m", 
+               date_breaks = "4 months") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10)) + 
+  theme_minimal()
+
+```
+
+```{r}
+# Visualize the next 3 months predictions
+ggplot() +
+  geom_line(data = filtered_historical_data, aes(x = date, y = quantity, color = 'Historical Sales Quantity'), linewidth = 1) +
+  geom_line(data = filtered_forecast_data, aes(x = date, y = quantity, color = 'Next 3 Months Forecasted Sales Quantity'), linetype = 'dashed', linewidth = 1) +
+  scale_x_date(
+    limits = c(start_date, end_date),               
+    labels = scales::date_format("%b %Y"),          
+    breaks = seq(start_date, end_date, by = "2 weeks") 
+  ) +
+  scale_y_continuous(labels = scales::comma) +
+ 
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10), 
+    axis.text.y = element_text(size = 10),                        
+    axis.title = element_text(size = 12),         
+    legend.title = element_blank(),                               
+    legend.text = element_text(size = 10),                        
+    legend.position = "bottom",                                   
+    legend.box = "horizontal",                                    
+    plot.title = element_text(size = 14, hjust = 0.5, vjust = 1.5, margin = margin(t = 20, b = 20)), 
+    panel.grid.minor = element_blank()                            
+  ) +
+  labs(
+    x = 'Time',
+    y = 'Total Sales Quantity',
+    title = 'Daily Car Sales Quantity Prediction (Sep 2023 - Mar 2024)'
+  ) +
+  scale_color_manual(
+    values = c(
+      'Historical Sales Quantity' = '#386641', # Aesthetic blue for historical data
+      'Next 3 Months Forecasted Sales Quantity' = '#e76f51' # Aesthetic red for forecasted data
+    )
+  )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+
+
+```{r}
+
+```
+

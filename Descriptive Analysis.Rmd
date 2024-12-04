@@ -1,0 +1,211 @@
+---
+title: "Descriptive"
+output: html_document
+date: "2024-12-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+library(readr)
+library(ggplot2)
+library(xgboost)
+library(caret)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(forecast)
+library(tseries)
+library(seastests)
+library(tidyr)
+library(ggplot2)
+library(scales)
+```
+
+```{r cars}
+# Download the dataset from GitHub
+url <- "https://raw.githubusercontent.com/fongbubble/UoB_MGRCM0034_Car_Sales/main/car_sales.csv"
+csv_file_path <- tempfile(fileext = ".csv")
+download.file(url, destfile = csv_file_path)
+print(paste("CSV File Path:", csv_file_path))
+
+# Read the CSV file
+df <- read_csv(csv_file_path)
+head(df, 5)
+```
+
+```{r}
+# Missing Values (Na) 
+missing_values <- colSums(is.na(df))
+missing_values
+```
+
+```{r}
+# Check for the number of duplicated rows
+num_duplicated_rows <- sum(duplicated(df))
+num_duplicated_rows
+```
+
+```{r}
+# Replace '5-Sep' with '9-5' and '3-Sep' with '9-3' in the 'Model' column
+df$Model <- sapply(df$Model, function(value) {
+  value <- gsub('5-Sep', '9-5', value)
+  value <- gsub('3-Sep', '9-3', value)
+  return(value)
+})
+```
+
+```{r}
+# Convert 'Date' column to Date format
+df$Date <- as.Date(df$Date, format = "%m/%d/%Y")
+
+# Convert 'Date' to monthly period and calculate monthly sum of prices
+df$Month <- floor_date(df$Date, "month")  
+monthly_sum_price <- df %>%
+  group_by(Month) %>%
+  summarise(Price = sum(`Price ($)`)) %>%
+  ungroup()
+
+# Ensure all months in the data range are shown on the x-axis
+all_months <- seq(min(monthly_sum_price$Month), max(monthly_sum_price$Month), by = "month")
+
+# Create the trendline 
+x <- seq_along(monthly_sum_price$Month)  
+y <- monthly_sum_price$Price  
+trend <- lm(y ~ x)  
+monthly_sum_price$Trendline <- predict(trend)
+
+# Plotting the monthly sum price trend
+ggplot(monthly_sum_price, aes(x = Month)) +
+  geom_line(aes(y = Price), color = "#735d78", size = 1) +
+  geom_point(aes(y = Price), color = "#735d78", size = 2) +
+  geom_line(aes(y = Trendline), linetype = "dashed", color = "red", size = 1) +
+  scale_x_date(breaks = all_months, date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::dollar_format()) +
+  labs(title = "Monthly Total Sales Trend",
+       x = "Month",
+       y = "Total Sales ($)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(size = 14, face = "bold", hjust = 0.5))
+```
+
+```{r}
+# Convert 'Date' column to datetime 
+df$Date <- as.Date(df$Date)
+
+# Extract month and year
+df$Month <- as.numeric(format(df$Date, "%m"))  
+df$Year <- as.numeric(format(df$Date, "%Y"))   
+
+# Check for NA values in Month and Year
+df <- df[!is.na(df$Month) & !is.na(df$Year), ]
+
+# Group by month and year, then sum 'Price ($)'
+monthly_sale <- aggregate(df$`Price ($)`, by=list(Month=df$Month, Year=df$Year), FUN=sum)
+colnames(monthly_sale)[3] <- "Price ($)"
+
+# group by month only and sum across years
+sum_by_month <- aggregate(monthly_sale$`Price ($)`, by=list(Month=monthly_sale$Month), FUN=sum)
+colnames(sum_by_month)[2] <- "Price ($)"
+
+total_price <- sum(df$`Price ($)`)
+
+sum_by_month$`seasonal index` <- sum_by_month$`Price ($)` / (total_price / 12)
+
+sum_by_month
+```
+
+```{r}
+# Convert 'Date' column to datetime 
+df$Date <- as.Date(df$Date)
+
+# Extract month and year
+df$Month <- as.numeric(format(df$Date, "%m"))  
+df$Year <- as.numeric(format(df$Date, "%Y"))   
+
+# Check for NA values in Month and Year
+df <- df[!is.na(df$Month) & !is.na(df$Year), ]
+
+# Group by month and year, then sum 'Price ($)'
+monthly_sale <- aggregate(df$`Price ($)`, by=list(Month=df$Month, Year=df$Year), FUN=sum)
+colnames(monthly_sale)[3] <- "Price ($)"
+
+# group by month only and sum across years
+sum_by_month <- aggregate(monthly_sale$`Price ($)`, by=list(Month=monthly_sale$Month), FUN=sum)
+colnames(sum_by_month)[2] <- "Price ($)"
+
+total_price <- sum(df$`Price ($)`)
+
+sum_by_month$`seasonal index` <- sum_by_month$`Price ($)` / (total_price / 12)
+
+# Plot the seasonal index
+ggplot(sum_by_month, aes(x = Month, y = `seasonal index`, group = 1)) +  
+  geom_line(color = "#9c89b8", size = 1) +  
+  geom_point(color = "#9c89b8", size = 3) + 
+  geom_hline(yintercept = 1, color = "#f0a6ca", linetype = "dashed", size = 1) +  
+  labs(
+    title = "Seasonal Index by Month",
+    x = "Month",
+    y = "Seasonal Index"
+  ) +
+  scale_x_continuous(breaks = 1:12, labels = 1:12) +  # Ensure x-axis is 1-12
+  scale_y_continuous(limits = c(0.2, NA), breaks = seq(0.2, max(sum_by_month$`seasonal index`, na.rm = TRUE) + 0.2, by = 0.2)) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    axis.text.x = element_text(color = "black", size = 12),
+    axis.text.y = element_text(color = "black", size = 12),
+    axis.title.x = element_text(size = 14),
+    axis.title.y = element_text(size = 14),
+    panel.grid.major = element_line(color = "gray80", linetype = "dotted"),
+    panel.grid.minor = element_blank()
+  )
+```
+
+```{r}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r cars}
+summary(cars)
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

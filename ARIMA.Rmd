@@ -1,0 +1,324 @@
+---
+title: "ARIMA"
+output: html_document
+date: "2024-12-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+```{r}
+if (!require(Metrics)) {
+  install.packages("Metrics")
+  library(Metrics)
+}
+```
+
+```{r}
+# Install ARIMA 
+install.packages("forecast")       
+install.packages("tseries")        
+install.packages("seastests")   
+```
+
+```{r}
+library(readr)
+library(ggplot2)
+library(xgboost)
+library(caret)
+library(dplyr)
+library(lubridate)
+library(ggplot2)
+library(zoo)
+library(forecast)
+library(tseries)
+library(seastests)
+library(tidyr)
+library(ggplot2)
+```
+
+```{r cars}
+# Download the dataset from GitHub
+url <- "https://raw.githubusercontent.com/fongbubble/UoB_MGRCM0034_Car_Sales/main/car_sales.csv"
+csv_file_path <- tempfile(fileext = ".csv")
+download.file(url, destfile = csv_file_path)
+print(paste("CSV File Path:", csv_file_path))
+
+# Read the CSV file
+df <- read_csv(csv_file_path)
+head(df, 5)
+```
+
+```{r}
+# Missing Values (Na) 
+missing_values <- colSums(is.na(df))
+missing_values
+```
+
+```{r}
+# Check for the number of duplicated rows
+num_duplicated_rows <- sum(duplicated(df))
+num_duplicated_rows
+```
+
+```{r}
+# Replace '5-Sep' with '9-5' and '3-Sep' with '9-3' in the 'Model' column
+df$Model <- sapply(df$Model, function(value) {
+  value <- gsub('5-Sep', '9-5', value)
+  value <- gsub('3-Sep', '9-3', value)
+  return(value)
+})
+```
+
+#ARIMA
+```{r}
+# Convert Date column to Date type
+df$date <- as.Date(df$Date, format = "%m/%d/%Y")
+
+# Group by date and calculate the total quantity of cars sold
+sales_quantity <- df %>%
+  group_by(date = floor_date(date, "day")) %>%
+  summarise(quantity = n())
+
+# Check that dates are in the correct format and sorted
+sales_quantity <- sales_quantity %>%
+  arrange(date)
+
+# Aggregate the data to daily totals
+daily_sales <- sales_quantity %>%
+  group_by(date) %>%
+  summarise(quantity = sum(quantity))
+
+# Display the first few rows to confirm structure
+print(head(daily_sales))
+```
+
+```{r}
+# Create a complete sequence of dates and fill missing dates with zeros
+all_dates <- seq.Date(min(sales_quantity$date), max(sales_quantity$date), by = "day")
+sales_quantity <- sales_quantity %>%
+  complete(date = all_dates, fill = list(quantity = 0))
+
+# Display the first few rows 
+print(head(sales_quantity))
+```
+```{r}
+# Plot ACF for the stationary series
+acf_plot <- ggAcf(sales_quantity$quantity) +
+  ggtitle("ACF of Quantity") +
+  theme_minimal()
+
+# Plot PACF for the stationary series
+pacf_plot <- ggPacf(sales_quantity$quantity) +
+  ggtitle("PACF of Quantity") +
+  theme_minimal()
+
+# Display the plots
+print(acf_plot)
+print(pacf_plot)
+```
+
+```{r}
+# ADF test
+adf_test <- adf.test(sales_quantity$quantity)
+print(paste("ADF Statistic:", adf_test$statistic))
+print(paste("p-value:", adf_test$p.value))
+
+# Test the p-value
+if (adf_test$p.value > 0.05) {
+  sales_quantity$quantity_diff <- diff(sales_quantity$quantity)
+} else {
+  sales_quantity$quantity_diff <- sales_quantity$quantity
+}
+
+# Check the first few rows 
+head(sales_quantity)
+```
+
+```{r}
+# Replace p, d, and q with values from ACF/PACF plots
+p <- 3
+d <- 0
+q <- 11
+# Train-test split
+train_size <- floor(0.8 * nrow(sales_quantity))
+train <- sales_quantity[1:train_size, ]
+test <- sales_quantity[(train_size + 1):nrow(sales_quantity), ]
+# Fit the ARIMA model
+fitted_model <- Arima(train$quantity, order = c(p, d, q))
+# Print the summary
+summary(model)
+```
+#Residual Diagnostics and Model Evaluation
+```{r}
+residuals <- residuals(model)
+
+# Histogram of residuals
+ggplot(data.frame(residuals), aes(x = residuals)) +
+  geom_histogram(aes(y = ..density..), bins = 30, fill = "#5c8001", alpha = 0.7) +
+  geom_density(color = "#fb6107") +
+  ggtitle("Histogram of Residuals") +
+  theme_minimal()
+
+# Q-Q plot
+qqnorm(residuals)
+qqline(residuals, col = "#fb6107")
+ggtitle("Q-Q Plot of Residuals")
+
+# Autocorrelation of residuals
+acf(residuals, main = "ACF of Residuals")
+```
+
+```{r}
+# Forecast on the test set
+forecast_test <- forecast(model, h = nrow(test))
+test$forecast <- forecast_test$mean
+
+# Plot actual vs forecast
+ggplot(test, aes(x = index(test))) +
+  geom_line(aes(y = quantity, color = "Actual")) +
+  geom_line(aes(y = forecast, color = "Forecast"), linetype = "dashed") +
+  ggtitle("Actual vs Forecast on Test Set") +
+  labs(color = "Legend") +
+  theme_minimal()
+
+# Evaluate error metrics
+mae_value <- mae(test$quantity, test$forecast)
+rmse_value <- rmse(test$quantity, test$forecast)
+
+print(paste("Mean Absolute Error (MAE):", mae_value))
+print(paste("Root Mean Squared Error (RMSE):", rmse_value))
+```
+```{r}
+# Forecast on the test set
+test_forecast <- forecast(fitted_model, h = nrow(test))
+test$forecast <- test_forecast$mean
+
+# Combine the data for plotting
+sales_quantity$Type <- "Full Data"
+train$Type <- "Training Data"
+test$Type <- "Test Data"
+
+# Combine all data into one data frame
+plot_data <- rbind(
+  data.frame(date = sales_quantity$date, quantity = sales_quantity$quantity, Type = sales_quantity$Type),
+  data.frame(date = train$date, quantity = train$quantity, Type = train$Type),
+  data.frame(date = test$date, quantity = test$quantity, Type = test$Type),
+  data.frame(date = test$date, quantity = test$forecast, Type = "Forecasted Data")
+)
+
+ggplot(plot_data, aes(x = date, y = quantity, color = Type)) +
+  geom_line(linewidth = 1.2) + 
+  labs(
+    title = "Train-Test-Forecast Visualization",
+    x = "Date",
+    y = "Quantity"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",            
+    legend.box = "horizontal",             
+    legend.title = element_blank(),        
+    legend.text = element_text(size = 10), 
+    plot.title = element_text(size = 14, hjust = 0.5, margin = margin(t = 10, b = 10)) 
+  ) +
+  scale_color_manual(
+    values = c(
+      "Full Data" = "blue",
+      "Training Data" = "green",
+      "Test Data" = "orange",
+      "Forecasted Data" = "red"
+    )
+  )
+```
+
+```{r}
+# Forecast the next 90 days
+forecast_steps <- 90
+future_forecast <- forecast(fitted_model, h = forecast_steps)
+
+# Create future dates
+last_date <- max(sales_quantity$date)
+forecast_dates <- seq.Date(from = last_date + 1, by = "day", length.out = forecast_steps)
+forecast_df <- data.frame(date = forecast_dates, forecast_quantity = future_forecast$mean)
+
+# Plot historical data and future forecast
+ggplot() +
+  geom_line(data = sales_quantity, aes(x = date, y = quantity, color = "Historical Sales Quantity")) +
+  geom_line(data = forecast_df, aes(x = date, y = forecast_quantity, color = "Next 3 Months Forecasted Sales Quantity"), linetype = "dashed") +
+  labs(title = "ARIMA Model - Daily Car Sales Quantity Prediction for Next 3 Months", x = "Date", y = "Total Sales Quantity") +
+  theme_minimal() +
+  scale_color_manual(values = c("Historical Sales Quantity" = "#f7a072", "Next 3 Months Forecasted Sales Quantity" = "#ed254e")) +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Legend"))
+```
+
+```{r}
+# Filter data 
+start_date <- as.Date('2023-09-01')
+end_date <- as.Date('2024-03-31')
+
+# Filter the historical sales and forecast data
+filtered_historical_data <- sales_quantity %>%
+  filter(date >= start_date & date <= end_date)
+filtered_forecast_data <- forecast_df %>%
+  filter(date >= start_date & date <= end_date)
+
+# Plot the filtered data
+ggplot() +
+  geom_line(data = filtered_historical_data, aes(x = date, y = quantity, color = "Historical Sales Quantity")) +
+  geom_line(data = filtered_forecast_data, aes(x = date, y = forecast_quantity, color = "Next 3 Months Forecasted Sales Quantity"), linetype = "dashed") +
+  labs(title = "ARIMA Model – Daily Car Sales Quantity Prediction", x = "Date", y = "Total Sales Quantity") +
+  theme_minimal() +
+  scale_color_manual(values = c("Historical Sales Quantity" = "#f7a072", "Next 3 Months Forecasted Sales Quantity" = "#ed254e")) +
+  theme(legend.position = "bottom") +
+  guides(color = guide_legend(title = "Legend"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+plot(pressure)
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
